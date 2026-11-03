@@ -57,13 +57,13 @@ PDF_TOOLS = {
     "powerpoint-to-pdf", "png-to-pdf", "edit-pdf", "page-numbers", "watermark-pdf",
     "crop-pdf", "add-text", "repair-pdf", "compare-pdf", "pdf-reader",
     "protect-pdf", "unlock-pdf", "pdf-to-png", "pdf-to-text", "pdf-metadata", "sign-pdf", "ocr-pdf",
-    "redact-pdf", "fill-pdf-form", "html-to-pdf", "sanitize-pdf-metadata",
+    "redact-pdf", "fill-pdf-form", "html-to-pdf", "sanitize-pdf-metadata", "extract-images", "pdf-to-markdown", "pdf-preflight", "remove-blank-pages",
 }
 PDF_BATCHABLE = {
     "split-pdf", "compress-pdf", "organize-pdf", "rotate-pdf", "remove-pages",
     "extract-pages", "pdf-to-word", "pdf-to-jpg", "pdf-to-excel", "pdf-to-powerpoint",
     "edit-pdf", "page-numbers", "watermark-pdf", "crop-pdf", "add-text", "repair-pdf",
-    "word-to-pdf", "excel-to-pdf", "powerpoint-to-pdf", "pdf-to-png", "pdf-to-text", "protect-pdf", "unlock-pdf", "ocr-pdf", "sanitize-pdf-metadata",
+    "word-to-pdf", "excel-to-pdf", "powerpoint-to-pdf", "pdf-to-png", "pdf-to-text", "protect-pdf", "unlock-pdf", "ocr-pdf", "sanitize-pdf-metadata", "extract-images", "pdf-to-markdown", "pdf-preflight", "remove-blank-pages",
 }
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 PDF_EXTS = {".pdf"}
@@ -77,7 +77,7 @@ MIME_TYPES = {
     ".doc": "application/msword", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xls": "application/vnd.ms-excel", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".ppt": "application/vnd.ms-powerpoint", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".png": "image/png", ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".zip": "application/zip",
+    ".png": "image/png", ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".zip": "application/zip",
 }
 
 
@@ -206,32 +206,76 @@ def _make_zip(files: list[tuple[Path, str]], out: Path) -> Path:
     return out
 
 
-def _run_libreoffice(source: Path, output_dir: Path) -> Path:
-    # Use the same Windows-aware detector that reads LIBREOFFICE_PATH.
-    # The previous implementation only used shutil.which(), which does not
-    # find LibreOffice when it is installed but not added to Windows PATH.
-    executable = _find_libreoffice()
-    if not executable:
-        configured = os.getenv("LIBREOFFICE_PATH", "").strip().strip('"')
-        raise HTTPException(
-            503,
-            "LibreOffice was not detected by the PaperNest API. "
-            "Set LIBREOFFICE_PATH to the full path of soffice.exe and restart the API. "
-            f"Configured path: {configured or '(not set)'}"
-        )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    profile = output_dir / f"lo-profile-{uuid.uuid4().hex}"
-    command = [executable, f"-env:UserInstallation={profile.as_uri()}", "--headless", "--convert-to", "pdf", "--outdir", str(output_dir), str(source)]
-    try:
-        proc = subprocess.run(command, capture_output=True, timeout=180, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(504, "Office conversion exceeded the 3-minute processing limit.") from exc
-    candidate = output_dir / f"{source.stem}.pdf"
-    if proc.returncode != 0 or not candidate.exists() or candidate.stat().st_size == 0:
-        # Never include document text or password-bearing arguments in the error response.
-        detail = proc.stderr.decode("utf-8", errors="ignore")[-300:]
-        raise HTTPException(422, f"LibreOffice could not convert this file. Check that it is valid and not password-protected. {detail}")
-    return candidate
+def _find_tesseract() -> str | None:
+    """Find a working Tesseract executable on Windows, macOS, or Linux."""
+    candidates: list[Path] = []
+
+    # 1. Explicit executable path. This is useful when FastAPI's PATH differs
+    # from the interactive user's PATH (for example, when launched by an IDE).
+    for variable in ("TESSERACT_PATH", "TESSERACT_CMD", "TESSERACT_EXE"):
+        configured = os.getenv(variable, "").strip().strip('"')
+        if not configured:
+            continue
+        configured_path = Path(configured).expanduser()
+        if configured_path.is_dir():
+            candidates.extend([
+                configured_path / "tesseract.exe",
+                configured_path / "tesseract",
+            ])
+        else:
+            candidates.append(configured_path)
+            # Also allow a command name such as "tesseract" in the setting.
+            found = shutil.which(configured)
+            if found:
+                candidates.append(Path(found))
+
+    # 2. Search the PATH inherited by the API process.
+    for name in ("tesseract.exe", "tesseract"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+
+    # 3. Common Windows install locations, including per-user installs.
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.getenv(variable)
+        if base:
+            candidates.extend([
+                Path(base) / "Tesseract-OCR" / "tesseract.exe",
+                Path(base) / "Programs" / "Tesseract-OCR" / "tesseract.exe",
+            ])
+
+    # 4. Common Unix locations (PATH normally finds these already).
+    candidates.extend([
+        Path("/usr/bin/tesseract"),
+        Path("/usr/local/bin/tesseract"),
+        Path("/opt/homebrew/bin/tesseract"),
+    ])
+
+    # 5. Return the first existing executable that Windows/Linux can launch.
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            candidate = candidate.resolve()
+            key = str(candidate).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            if not candidate.is_file():
+                continue
+            result = subprocess.run(
+                [str(candidate), "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0:
+                return str(candidate)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            continue
+
+    return None
+
 
 def _find_libreoffice() -> str | None:
     """Find LibreOffice on Windows, including registry and custom install paths."""
@@ -288,7 +332,7 @@ def _find_libreoffice() -> str | None:
         except ImportError:
             pass
 
-    # 5. Return the first existing executable
+    # 5. Return the first existing executable that can actually launch
     seen = set()
     for candidate in candidates:
         try:
@@ -298,7 +342,6 @@ def _find_libreoffice() -> str | None:
             seen.add(str(candidate).lower())
 
             if candidate.is_file():
-                # Verify that Windows can actually launch it
                 result = subprocess.run(
                     [str(candidate), "--headless", "--version"],
                     capture_output=True,
@@ -312,6 +355,26 @@ def _find_libreoffice() -> str | None:
             continue
 
     return None
+
+
+def _run_libreoffice(source: Path, output_dir: Path) -> Path:
+    executable = _find_libreoffice()
+    if not executable:
+        raise HTTPException(503, "Office conversion requires LibreOffice. Install it on the API host and retry.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    profile = output_dir / f"lo-profile-{uuid.uuid4().hex}"
+    command = [executable, f"-env:UserInstallation={profile.as_uri()}", "--headless", "--convert-to", "pdf", "--outdir", str(output_dir), str(source)]
+    try:
+        proc = subprocess.run(command, capture_output=True, timeout=180, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "Office conversion exceeded the 3-minute processing limit.") from exc
+    candidate = output_dir / f"{source.stem}.pdf"
+    if proc.returncode != 0 or not candidate.exists() or candidate.stat().st_size == 0:
+        # Never include document text or password-bearing arguments in the error response.
+        detail = proc.stderr.decode("utf-8", errors="ignore")[-300:]
+        raise HTTPException(422, f"LibreOffice could not convert this file. Check that it is valid and not password-protected. {detail}")
+    return candidate
+
 
 def _pdf_to_docx(source: Path, out: Path) -> str:
     try:
@@ -1286,17 +1349,160 @@ def _process_single(tool: str, paths: list[Path], options: dict[str, Any], outdi
     reader = _read_pdf(source)
     total = len(reader.pages)
 
+    # Optional 1-based page selection shared by PDF conversion tools.
+    page_selectable_tools = {"pdf-to-jpg", "pdf-to-png", "pdf-to-word", "pdf-to-excel", "pdf-to-powerpoint", "pdf-to-text", "pdf-to-markdown", "ocr-pdf"}
+    page_spec = str(options.get("pages", "")).strip()
+    if tool in page_selectable_tools and page_spec:
+        selected_indices = _parse_pages(page_spec, total, default_all=False)
+        selected_doc = fitz.open(str(source))
+        selected_pdf = fitz.open()
+        for page_index in selected_indices:
+            selected_pdf.insert_pdf(selected_doc, from_page=page_index, to_page=page_index)
+        selected_source = outdir / f"{base}-selected-pages.pdf"
+        selected_pdf.save(str(selected_source), garbage=4, deflate=True)
+        selected_pdf.close()
+        selected_doc.close()
+        source = selected_source
+        reader = _read_pdf(source)
+        total = len(reader.pages)
+
+    if tool == "extract-images":
+        doc = fitz.open(str(source))
+        artifacts = []
+        seen = set()
+        try:
+            for page_index, page in enumerate(doc, start=1):
+                for image_index, image_info in enumerate(page.get_images(full=True), start=1):
+                    xref = image_info[0]
+                    extracted = doc.extract_image(xref)
+                    payload = extracted.get("image", b"")
+                    ext_img = re.sub(r"[^a-z0-9]", "", extracted.get("ext", "png").lower()) or "png"
+                    digest = __import__("hashlib").sha256(payload).hexdigest()
+                    if not payload or digest in seen:
+                        continue
+                    seen.add(digest)
+                    image_path = outdir / f"page-{page_index:03d}-image-{image_index:03d}.{ext_img}"
+                    image_path.write_bytes(payload)
+                    artifacts.append((image_path, image_path.name))
+        finally:
+            doc.close()
+        if not artifacts:
+            raise HTTPException(422, "No extractable embedded images were found in this PDF.")
+        archive = _make_zip(artifacts, outdir / f"{base}-extracted-images.zip")
+        return archive, f"Extracted {len(artifacts)} unique embedded image(s) from the PDF. Images that exist only as parts of a scanned page may not be separately extractable."
+
+    if tool == "remove-blank-pages":
+        doc = fitz.open(str(source))
+        kept = fitz.open()
+        removed = []
+        try:
+            for idx, page in enumerate(doc):
+                text = page.get_text("text").strip()
+                images = page.get_images(full=True)
+                drawings = page.get_drawings()
+                # Conservative blank heuristic: no selectable text, images, or vector drawings.
+                if not text and not images and not drawings:
+                    removed.append(idx + 1)
+                else:
+                    kept.insert_pdf(doc, from_page=idx, to_page=idx)
+            if not removed:
+                raise HTTPException(400, "No clearly blank pages were detected. No output was created.")
+            if kept.page_count < 1:
+                raise HTTPException(400, "Every page appeared blank. Nothing was removed to avoid creating an empty PDF.")
+            target = outdir / f"{base}-blank-pages-removed.pdf"
+            kept.save(str(target), garbage=4, deflate=True)
+            return target, f"Removed {len(removed)} clearly blank page(s): {', '.join(map(str, removed))}. This conservative check does not remove visually white scanned pages that contain an image layer."
+        finally:
+            doc.close()
+            kept.close()
+
+    if tool == "pdf-preflight":
+        doc = fitz.open(str(source))
+        try:
+            metadata = doc.metadata or {}
+            page_rows = []
+            image_count = 0
+            text_pages = 0
+            for idx, page in enumerate(doc, start=1):
+                text = page.get_text("text").strip()
+                images = page.get_images(full=True)
+                image_count += len(images)
+                text_pages += bool(text)
+                image_dpis = []
+                for image in images:
+                    try:
+                        rects = page.get_image_rects(image[0])
+                        info = doc.extract_image(image[0])
+                        w, h = int(info.get("width", 0)), int(info.get("height", 0))
+                        for rect in rects:
+                            if rect.width > 0 and rect.height > 0 and w and h:
+                                image_dpis.append((round(w * 72 / rect.width), round(h * 72 / rect.height)))
+                    except Exception:
+                        pass
+                page_rows.append({"page": idx, "width_pt": round(page.rect.width, 2), "height_pt": round(page.rect.height, 2), "text_present": bool(text), "images": len(images), "lowest_image_dpi": min((min(pair) for pair in image_dpis), default=None)})
+            fonts = set()
+            for page in doc:
+                for font in page.get_fonts(full=True):
+                    if len(font) > 3 and font[3]: fonts.add(str(font[3]))
+            attachments = list(doc.embfile_names() or [])
+            annotations = sum(1 for page in doc for _ in (page.annots() or []))
+            links = sum(len(page.get_links()) for page in doc)
+            report = {"filename": Path(source).name, "page_count": doc.page_count, "file_size_bytes": Path(source).stat().st_size, "encrypted": bool(doc.is_encrypted), "metadata": {k: v for k, v in metadata.items() if k in {"title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate"}}, "pages_with_selectable_text": text_pages, "pages_without_selectable_text": doc.page_count - text_pages, "embedded_image_references": image_count, "unique_fonts": sorted(fonts), "attachment_names": attachments, "annotation_count": annotations, "link_count": links, "pages": page_rows, "notes": ["This automated report checks detectable PDF properties; it is not PDF/A or accessibility certification.", "Low-resolution image estimates apply to extractable embedded images only."]}
+            target = outdir / f"{base}-preflight-report.html"
+            import html as html_module
+            escaped = html_module.escape(json.dumps(report, indent=2, ensure_ascii=False))
+            title = html_module.escape(Path(source).name)
+            report_html = """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF Preflight Report</title><style>body{font:15px/1.6 system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 18px;color:#292725;background:#f8f7f4}h1{font-size:28px}.card{background:#fffefa;border:1px solid #e6e2da;border-radius:12px;padding:18px;margin:16px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace}@media(prefers-color-scheme:dark){body{color:#f2eee7;background:#1d1c1a}.card{background:#252421;border-color:#403d38}}</style><h1>PDF Preflight Report</h1><p>""" + title + """</p><section class="card"><h2>Document inspection</h2><pre>""" + escaped + """</pre></section></html>"""
+            target.write_text(report_html, encoding="utf-8")
+            return target, f"Preflight report generated for {doc.page_count} page(s), including metadata, text presence, fonts, image references, annotations, links, attachments, and page dimensions."
+        finally:
+            doc.close()
+
+    if tool == "pdf-to-markdown":
+        doc = fitz.open(str(source))
+        try:
+            parts = []
+            for idx, page in enumerate(doc, start=1):
+                text = page.get_text("text", sort=True).strip()
+                if not text:
+                    parts.append(f"<!-- Page {idx}: no selectable text found; OCR may be needed. -->")
+                    continue
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                converted = []
+                for line in lines:
+                    if len(line) < 100 and (line.isupper() or (len(line) < 70 and line.istitle())):
+                        converted.append(f"## {line}")
+                    else:
+                        converted.append(line)
+                parts.append(f"<!-- Page {idx} -->\n\n" + "\n\n".join(converted))
+            markdown = "\n\n---\n\n".join(parts).strip() + "\n"
+            if not any(page.get_text("text").strip() for page in doc):
+                raise HTTPException(422, "No selectable text was found. Scanned PDFs need OCR before Markdown conversion.")
+            target = outdir / f"{base}.md"
+            target.write_text(markdown, encoding="utf-8")
+            return target, f"Converted {len(doc)} page(s) to Markdown using text extraction and simple heading heuristics. Review complex tables and multi-column layouts."
+        finally:
+            doc.close()
+
     if tool == "ocr-pdf":
         if source.suffix.lower() != ".pdf":
             raise HTTPException(400, "Upload a PDF file.")
-        executable = shutil.which("tesseract")
+        executable = _find_tesseract()
         if not executable:
-            raise HTTPException(503, "OCR requires Tesseract OCR. Install Tesseract and its language data on the API host.")
+            raise HTTPException(
+                503,
+                "Tesseract OCR was not found by the PaperNest API process. Install Tesseract on the machine/container running FastAPI, add its install folder to PATH, or set TESSERACT_PATH to the full executable path (for example, C:\\Program Files\\Tesseract-OCR\\tesseract.exe), then restart the API.",
+            )
         language = str(options.get("language", "eng"))
         if not re.fullmatch(r"[A-Za-z0-9_+]+", language):
             raise HTTPException(400, "Choose a valid OCR language code.")
         try:
             available = subprocess.run([executable, "--list-langs"], capture_output=True, text=True, timeout=10, check=False)
+            if available.returncode != 0:
+                raise HTTPException(
+                    503,
+                    "Tesseract was found but could not load its language data. Install the required .traineddata files and verify TESSDATA_PREFIX if you use a custom tessdata directory.",
+                )
             installed = {line.strip() for line in available.stdout.splitlines()[1:] if line.strip()}
             requested = language.split("+")
             if not all(code in installed for code in requested):
@@ -1426,6 +1632,59 @@ def _process_single(tool: str, paths: list[Path], options: dict[str, Any], outdi
         spec = str(options.get("pages", "")).strip()
         mode = str(options.get("mode", "ranges"))
         selected = _parse_pages(spec, total) if spec else list(range(total))
+        if mode == "bookmarks":
+            doc = fitz.open(str(source))
+            toc = doc.get_toc()
+            boundaries = sorted({max(0, min(total - 1, int(row[2]) - 1)) for row in toc if len(row) >= 3 and int(row[0]) == 1 and int(row[2]) >= 1})
+            doc.close()
+            if not boundaries:
+                raise HTTPException(400, "No top-level bookmarks were found. Add bookmarks or use page ranges instead.")
+            if boundaries[0] != 0:
+                boundaries.insert(0, 0)
+            boundaries = sorted(set(boundaries))
+            outputs = []
+            for idx, start_page in enumerate(boundaries):
+                end_page = boundaries[idx + 1] - 1 if idx + 1 < len(boundaries) else total - 1
+                writer = PdfWriter()
+                for page_no in range(start_page, end_page + 1):
+                    writer.add_page(reader.pages[page_no])
+                label = f"section-{idx + 1:03d}"
+                part = outdir / f"{base}-{label}.pdf"
+                _write_pdf(writer, part)
+                outputs.append((part, part.name))
+            return _make_zip(outputs, outdir / f"{base}-bookmark-sections.zip"), f"Split the PDF into {len(outputs)} section(s) using top-level bookmark destinations. Bookmark titles are retained in this report only through the source document; inspect the generated files."
+        if mode == "size":
+            target_mb = max(1, min(100, int(options.get("target_mb", 10))))
+            target_bytes = target_mb * 1024 * 1024
+            groups = []
+            current = []
+            current_size = 0
+            for page_no, page in enumerate(reader.pages):
+                writer = PdfWriter()
+                for existing in current:
+                    writer.add_page(reader.pages[existing])
+                writer.add_page(page)
+                probe = io.BytesIO(); writer.write(probe)
+                if current and len(probe.getvalue()) > target_bytes:
+                    groups.append(current)
+                    current = [page_no]
+                    current_size = 0
+                else:
+                    current.append(page_no)
+                    current_size = len(probe.getvalue())
+            if current:
+                groups.append(current)
+            outputs = []
+            for idx, group in enumerate(groups, start=1):
+                writer = PdfWriter()
+                for page_no in group:
+                    writer.add_page(reader.pages[page_no])
+                part = outdir / f"{base}-part-{idx:03d}.pdf"
+                _write_pdf(writer, part)
+                outputs.append((part, part.name))
+            if len(outputs) == 1:
+                return outputs[0][0], f"The PDF already fits within approximately {target_mb} MB; no split was necessary."
+            return _make_zip(outputs, outdir / f"{base}-size-parts.zip"), f"Split into {len(outputs)} file(s), targeting approximately {target_mb} MB each. A single page can exceed the target and exact output sizes vary."
         if not spec or mode == "each":
             outputs = []
             for page_no in selected:
@@ -2058,6 +2317,24 @@ async def process(tool: str, files: list[UploadFile] = File(default=[]), options
     finally:
         for upload in files:
             await upload.close()
+
+
+@app.get("/api/preview/{job_id}")
+def preview_output(job_id: str) -> FileResponse:
+    """Serve safe, generated preview formats inline in the result viewer."""
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(404, "Preview not found or expired.")
+    job_dir = ROOT / job_id
+    metadata_path = job_dir / "metadata.json"
+    candidates = list(job_dir.glob("output.*")) if job_dir.exists() else []
+    if not metadata_path.exists() or len(candidates) != 1:
+        raise HTTPException(404, "Preview not found or expired.")
+    output_path = candidates[0]
+    ext = output_path.suffix.lower()
+    inline_types = {".pdf": "application/pdf", ".html": "text/html; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8"}
+    if ext not in inline_types:
+        raise HTTPException(415, "Inline preview is not available for this output type. Download the file to inspect it.")
+    return FileResponse(output_path, media_type=inline_types[ext], headers={"Content-Disposition": "inline", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox"})
 
 
 @app.get("/api/download/{job_id}")

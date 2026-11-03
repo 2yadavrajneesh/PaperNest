@@ -86,6 +86,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
   const [error, setError] = useState("");
   const [result, setResult] = useState<ProcessResult | null>(null);
   const [resultMessage, setResultMessage] = useState("");
+  const [resultPreviewOpen, setResultPreviewOpen] = useState(true);
   const [readerOpen, setReaderOpen] = useState(false);
   const [readerUrl, setReaderUrl] = useState("");
   const [apiAvailable, setApiAvailable] = useState<boolean | null>(null);
@@ -106,18 +107,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
   const [redactDrawing, setRedactDrawing] = useState<{ page: number; x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   useEffect(() => {
-    if (!tool) return;
-    setSettings(makeDefaults(tool));
-    // Each tool gets its own clean workspace. In particular, URL-to-PDF must
-    // not inherit stale file uploads from the previously visited tool.
-    setFiles([]);
-    setPreview(null);
-    setResult(null);
-    setResultMessage("");
-    setError("");
-    setStage("idle");
-    setUploadPercent(0);
-    setReaderOpen(false);
+    if (tool) setSettings(makeDefaults(tool));
   }, [slug]);
 
   useEffect(() => {
@@ -307,10 +297,10 @@ export function ToolWorkspace({ slug }: { slug: string }) {
   const addFiles = useCallback((list: FileList | File[]) => {
     if (!tool) return;
     if (tool.slug === "html-to-pdf") {
-      setError("This tool converts a webpage URL. Paste the URL into the field instead of uploading a file.");
+      setError("HTML / URL to PDF uses a public webpage URL. Paste the address into the URL field instead of uploading a file.");
       return;
     }
-    setError(""); setResult(null); setResultMessage(""); setReaderOpen(false); setStage("idle"); setUploadPercent(0);
+    setError(""); setResult(null); setResultMessage(""); setResultPreviewOpen(true); setReaderOpen(false); setStage("idle"); setUploadPercent(0);
     const incoming = Array.from(list);
     const allowed = allowedExtensions(tool);
     const valid: File[] = [];
@@ -374,7 +364,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
     if (tool.slug === "html-to-pdf" && files.length === 0) {
       try {
         const parsedUrl = new URL(String(settings.url || "").trim());
-        urlOnlyReady = (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") && Boolean(parsedUrl.hostname);
+        urlOnlyReady = ["http:", "https:"].includes(parsedUrl.protocol) && Boolean(parsedUrl.hostname);
       } catch {
         urlOnlyReady = false;
       }
@@ -396,8 +386,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
       else if (tool?.slug === "compare-pdf" && files.length !== 2) setError("Select exactly two PDF files to compare.");
       else if (["remove-pages", "extract-pages"].includes(tool?.slug || "") && !String(settings.pages || "").trim()) setError("Enter the page numbers or range to continue.");
       else if (tool?.slug === "add-text" && !String(settings.text || "").trim()) setError("Enter the text to add to the PDF.");
-      else if (tool?.slug === "html-to-pdf" && !String(settings.url || "").trim() && !files.length) setError("Enter a public webpage URL beginning with https:// or http://.");
-      else if (tool?.slug === "html-to-pdf" && files.length === 0) setError("Enter a valid HTTP or HTTPS webpage URL.");
+      else if (tool?.slug === "html-to-pdf" && !String(settings.url || "").trim()) setError("Enter a public webpage URL beginning with https:// or http://.");
       return;
     }
     if (tool.slug === "html-to-pdf") {
@@ -409,7 +398,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
         return;
       }
       if (files.length > 0) {
-        setError("HTML / URL to PDF accepts a webpage URL, not an uploaded file. Remove the file and paste a URL above.");
+        setError("HTML / URL to PDF accepts a webpage URL, not an uploaded file.");
         return;
       }
     }
@@ -526,7 +515,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
       <div className="mx-auto max-w-[1240px] px-5 sm:px-8">
         <div className="workspace-layout">
           <div className="workspace-main">
-            <section className="workspace-card" onDragEnter={(event) => { event.preventDefault(); if (tool.slug !== "html-to-pdf") setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); if (event.dataTransfer.files?.length && tool.slug !== "html-to-pdf") addFiles(event.dataTransfer.files); }}>
+            <section className="workspace-card" onDragEnter={(event) => { event.preventDefault(); if (tool.slug !== "html-to-pdf") setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); if (tool.slug !== "html-to-pdf" && event.dataTransfer.files?.length) addFiles(event.dataTransfer.files); }}>
               <div className="workspace-card-head"><div><h2>{tool.slug === "html-to-pdf" ? "Enter a webpage URL" : files.length ? "Your files" : "Start by uploading files"}</h2><p>{tool.slug === "html-to-pdf" ? "Paste the public website address you want to save as a PDF." : files.length ? `${files.length} file${files.length === 1 ? "" : "s"} selected · ${formatBytes(totalBytes)} total` : `Supported formats: ${tool.formats}`}</p></div><span className="step-label"><i>1</i> {tool.slug === "html-to-pdf" ? "Website" : "Upload"}</span></div>
               {tool.slug !== "html-to-pdf" && <input ref={fileInputRef} type="file" accept={tool.accepts} multiple={tool.multiple} className="sr-only" onChange={(event) => { if (event.target.files?.length) addFiles(event.target.files); }} aria-label={`Select files for ${tool.title}`} />}
               {tool.slug === "html-to-pdf" ? (
@@ -563,13 +552,17 @@ export function ToolWorkspace({ slug }: { slug: string }) {
                 </div>
               )}
               {error && <div className="processing-state error"><AlertCircle size={16} /><span>{error}</span></div>}
-              {busy && <div className="processing-state"><LoaderCircle size={17} className="animate-spin" /><span>{stage === "uploading" ? `Uploading files… ${uploadPercent}%` : "Files uploaded. Processing with the document engine… This can take a moment for large files."}</span></div>}
+              {busy && <div className="processing-state"><LoaderCircle size={17} className="animate-spin" /><span>{stage === "uploading" ? tool.slug === "html-to-pdf" ? "Submitting webpage URL…" : `Uploading files… ${uploadPercent}%` : tool.slug === "html-to-pdf" ? "Rendering the webpage with Chromium…" : "Files uploaded. Processing with the document engine… This can take a moment for large files."}</span></div>}
               {stage === "done" && !result && tool.slug === "pdf-reader" && readerOpen && <div className="processing-state success"><CheckCircle2 size={17} /><span>Reader ready. The browser is displaying the local document; no output file was created.</span></div>}
               {result && (
                 <div className="result-card">
                   <div className="result-heading"><div className="result-check"><Check size={18} /></div><div><b>Your file is ready</b><span>{result.filename} · {formatBytes(result.size)}</span></div></div>
                   <p className="result-message">{resultMessage}</p>
                   <a className="download-button" href={`${API_BASE}${result.download_url}`}><Download size={16} /> Download result</a>
+                  {([".pdf", ".html", ".md", ".txt", ".csv"].some((ext) => result.filename.toLowerCase().endsWith(ext))) ? <>
+                    <button className="result-preview-toggle" type="button" onClick={() => setResultPreviewOpen((open) => !open)}><Eye size={14} /> {resultPreviewOpen ? "Hide result preview" : "Preview generated result"}</button>
+                    {resultPreviewOpen && <div className="result-preview-window"><div className="result-preview-toolbar"><span>Preview · {result.filename}</span><a href={`${API_BASE}/api/preview/${result.job_id}`} target="_blank" rel="noreferrer">Open separately ↗</a></div><iframe src={`${API_BASE}/api/preview/${result.job_id}`} title={`Preview of ${result.filename}`} /></div>}
+                  </> : <p className="result-preview-note">This output is a {result.filename.split(".").pop()?.toUpperCase() || "file"} archive/document. Download it to inspect its contents.</p>}
                   <button className="reset-button" type="button" onClick={resetWorkspace}><RotateCcw size={13} /> Start another task</button>
                 </div>
               )}

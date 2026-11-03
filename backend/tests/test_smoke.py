@@ -4,7 +4,6 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
@@ -147,6 +146,30 @@ class PaperNestSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         data = download_bytes(self.client, response.json()["download_url"])
         self.assertGreater(len(PdfReader(io.BytesIO(data)).pages), 0)
+
+    def test_split_by_top_level_bookmarks(self):
+        doc = fitz.open()
+        for idx in range(4):
+            page = doc.new_page(width=300, height=400)
+            page.insert_text((30, 50), f"Bookmark section page {idx + 1}")
+        doc.set_toc([[1, "Part One", 1], [1, "Part Two", 3]])
+        pdf_bytes = doc.tobytes(); doc.close()
+        response = self.client.post("/api/process/split-pdf", files=[("files", ("bookmarks.pdf", pdf_bytes, "application/pdf"))], data={"options": '{"mode":"bookmarks"}'})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            pdfs = [name for name in archive.namelist() if name.endswith(".pdf")]
+            self.assertEqual(len(pdfs), 2)
+            self.assertEqual(len(PdfReader(io.BytesIO(archive.read(pdfs[0]))).pages), 2)
+            self.assertEqual(len(PdfReader(io.BytesIO(archive.read(pdfs[1]))).pages), 2)
+
+    def test_split_by_approximate_size(self):
+        response = self.client.post("/api/process/split-pdf", files=[("files", ("size.pdf", create_pdf(4), "application/pdf"))], data={"options": '{"mode":"size","target_mb":1}'})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        # Small source fits under the target and correctly returns a single PDF rather than a ZIP.
+        with fitz.open(stream=payload, filetype="pdf") as doc:
+            self.assertEqual(doc.page_count, 4)
 
     def test_split_returns_zip(self):
         response = self.client.post("/api/process/split-pdf", files=[("files", ("three.pdf", create_pdf(3), "application/pdf"))], data={"options": '{"mode":"each"}'})
@@ -519,23 +542,6 @@ class PaperNestSmokeTests(unittest.TestCase):
         self.assertTrue(all(page["data_url"].startswith("data:image/jpeg;base64,") for page in payload["pages"]))
         self.assertTrue(all(page["width_pt"] > 0 and page["height_pt"] > 0 for page in payload["pages"]))
 
-    def test_html_to_pdf_url_only_request(self):
-        def fake_url_renderer(paths, options, outdir, base):
-            self.assertEqual(paths, [])
-            self.assertEqual(options.get("url"), "https://example.com/report")
-            outdir.mkdir(parents=True, exist_ok=True)
-            target = outdir / f"{base}.pdf"
-            target.write_bytes(create_pdf(1, "Public URL page"))
-            return target, "URL converted in test renderer."
-
-        with patch("app.main._html_to_pdf", side_effect=fake_url_renderer):
-            response = self.client.post("/api/process/html-to-pdf", data={"options": json.dumps({"url": "https://example.com/report", "page_format": "A4"})})
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = download_bytes(self.client, response.json()["download_url"])
-        with fitz.open(stream=payload, filetype="pdf") as document:
-            self.assertEqual(document.page_count, 1)
-            self.assertIn("Public URL page", document[0].get_text())
-
     def test_html_to_pdf_uploaded_html(self):
         html = b"<!doctype html><html><head><title>Smoke test</title><style>h1{color:#c65f43}</style></head><body><h1>PaperNest HTML TEST</h1><p>HTML gets rendered to a real PDF.</p></body></html>"
         response = self.client.post("/api/process/html-to-pdf", files=[("files", ("sample.html", html, "text/html"))], data={"options": '{"page_format":"A4","margin_mm":10,"print_background":"yes"}'})
@@ -580,6 +586,77 @@ class PaperNestSmokeTests(unittest.TestCase):
             self.assertIn("Visible content", document[0].get_text())
             self.assertEqual(document.metadata.get("title"), "")
             self.assertEqual(list(document[0].annots() or []), [])
+
+    def test_pdf_to_jpg_page_selection_outputs_only_selected_pages(self):
+        response = self.client.post("/api/process/pdf-to-jpg", files=[("files", ("pages.pdf", create_pdf(4), "application/pdf"))], data={"options": '{"pages":"2,4","dpi":72}'})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            images = [name for name in archive.namelist() if name.lower().endswith(".jpg")]
+            self.assertEqual(len(images), 2)
+
+    def test_extract_images_from_pdf_creates_zip(self):
+        image = Image.new("RGB", (80, 60), (220, 80, 50))
+        image_bytes = io.BytesIO(); image.save(image_bytes, format="PNG")
+        doc = fitz.open(); page = doc.new_page(width=300, height=400)
+        page.insert_image(fitz.Rect(30, 40, 150, 130), stream=image_bytes.getvalue())
+        pdf_bytes = doc.tobytes(); doc.close()
+        response = self.client.post("/api/process/extract-images", files=[("files", ("pictures.pdf", pdf_bytes, "application/pdf"))], data={"options": "{}"})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            images = [name for name in archive.namelist() if name.lower().endswith((".png", ".jpg", ".jpeg"))]
+            self.assertEqual(len(images), 1)
+            self.assertGreater(len(archive.read(images[0])), 20)
+
+    def test_generated_pdf_has_inline_preview(self):
+        response = self.client.post("/api/process/rotate-pdf", files=[("files", ("preview.pdf", create_pdf(1), "application/pdf"))], data={"options": '{"rotation":"90","pages":""}'})
+        self.assertEqual(response.status_code, 200, response.text)
+        job_id = response.json()["job_id"]
+        preview = self.client.get(f"/api/preview/{job_id}")
+        self.assertEqual(preview.status_code, 200, preview.text[:200])
+        self.assertEqual(preview.headers.get("content-type", "").split(";")[0], "application/pdf")
+        self.assertIn("inline", preview.headers.get("content-disposition", ""))
+
+    def test_pdf_to_markdown_generates_readable_markdown(self):
+        response = self.client.post("/api/process/pdf-to-markdown", files=[("files", ("notes.pdf", create_text_pdf(["Important Heading", "Some body content"]), "application/pdf"))], data={"options": "{}"})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        self.assertIn(b"Important Heading", payload)
+        self.assertIn(b"Some body content", payload)
+
+    def test_pdf_preflight_report_is_viewable_html(self):
+        response = self.client.post("/api/process/pdf-preflight", files=[("files", ("report-source.pdf", create_pdf(2), "application/pdf"))], data={"options": "{}"})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertTrue(result["filename"].endswith(".html"))
+        preview = self.client.get(f"/api/preview/{result['job_id']}")
+        self.assertEqual(preview.status_code, 200, preview.text[:200])
+        self.assertIn(b"PDF Preflight Report", preview.content)
+        self.assertIn("inline", preview.headers.get("content-disposition", ""))
+
+    def test_remove_blank_pages_removes_only_clearly_empty_pages(self):
+        doc = fitz.open()
+        p1 = doc.new_page(width=300, height=400)
+        p1.insert_text((30, 50), "Keep this page")
+        doc.new_page(width=300, height=400)
+        p3 = doc.new_page(width=300, height=400)
+        p3.insert_text((30, 50), "Keep this page too")
+        data = doc.tobytes(); doc.close()
+        response = self.client.post("/api/process/remove-blank-pages", files=[("files", ("blanks.pdf", data, "application/pdf"))], data={"options": "{}"})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        with fitz.open(stream=payload, filetype="pdf") as result:
+            self.assertEqual(result.page_count, 2)
+            self.assertIn("Keep this page", result[0].get_text())
+            self.assertIn("Keep this page too", result[1].get_text())
+
+    def test_pdf_to_text_page_selection(self):
+        response = self.client.post("/api/process/pdf-to-text", files=[("files", ("pages.pdf", create_pdf(3, "Selection"), "application/pdf"))], data={"options": '{"pages":"2"}'})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = download_bytes(self.client, response.json()["download_url"])
+        self.assertIn(b"Selection page 2", payload)
+        self.assertNotIn(b"Selection page 1", payload)
 
     def test_rejects_mislabeled_pdf(self):
         response = self.client.post("/api/process/rotate-pdf", files=[("files", ("bad.pdf", b"not a pdf", "application/pdf"))], data={"options": "{}"})

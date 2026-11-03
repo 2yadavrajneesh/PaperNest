@@ -480,6 +480,18 @@ html.dark .estimate-limits.is-warning, html.dark .estimate-limits strong { color
   .estimate-metrics { grid-template-columns: 1fr; }
 }
 
+/* Generated-result viewer */
+.result-preview-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 7px; width: 100%; margin-top: 9px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; color: var(--text); background: var(--surface); font-size: 10px; font-weight: 650; }
+.result-preview-toggle:hover { border-color: color-mix(in srgb, var(--brand) 40%, var(--line)); color: var(--brand); }
+.result-preview-window { overflow: hidden; margin-top: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.result-preview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 9px; }
+.result-preview-toolbar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-preview-toolbar a { flex: 0 0 auto; color: var(--brand); font-weight: 650; }
+.result-preview-window iframe { display: block; width: 100%; height: 520px; border: 0; background: var(--surface); }
+.result-preview-note { margin-top: 9px; color: var(--muted); font-size: 9px; line-height: 1.55; }
+@media (max-width: 700px) { .result-preview-window iframe { height: 420px; } }
+
+
 /* URL-only source field for HTML / URL to PDF */
 .url-to-pdf-entry { display: grid; gap: 9px; margin: 20px; padding: 22px; border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--surface-soft) 58%, var(--surface)); }
 .url-to-pdf-entry > label { color: var(--text); font-size: 12px; font-weight: 750; }
