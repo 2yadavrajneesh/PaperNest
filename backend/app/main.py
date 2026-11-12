@@ -25,6 +25,7 @@ import pdfplumber
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from openpyxl import Workbook
 from PIL import Image, ImageFilter, ImageOps
@@ -2487,7 +2488,7 @@ async def process(tool: str, files: list[UploadFile] = File(default=[]), options
             final_path.chmod(0o600)
         except OSError:
             pass
-        (job_dir / "metadata.json").write_text(json.dumps({"name": output_name, "size": final_path.stat().st_size, "created": time.time()}), encoding="utf-8")
+        (job_dir / "metadata.json").write_text(json.dumps({"name": output_name, "size": final_path.stat().st_size, "created": time.time(), "tool": tool}), encoding="utf-8")
         return {"job_id": job_id, "filename": output_name, "size": final_path.stat().st_size, "download_url": f"/api/download/{job_id}", "message": message or "Processing completed successfully."}
     except HTTPException:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -2533,4 +2534,5 @@ def download(job_id: str) -> FileResponse:
         raise HTTPException(404, "Download is no longer available.") from exc
     output_path = output_candidates[0]
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(metadata.get("name", output_path.name)))[:120]
-    return FileResponse(output_path, filename=name, media_type=MIME_TYPES.get(output_path.suffix.lower(), "application/octet-stream"), headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    cleanup_after_download = BackgroundTask(shutil.rmtree, str(job_dir), ignore_errors=True) if metadata.get("tool") == "news-screenshot-pdf" else None
+    return FileResponse(output_path, filename=name, media_type=MIME_TYPES.get(output_path.suffix.lower(), "application/octet-stream"), headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}, background=cleanup_after_download)
