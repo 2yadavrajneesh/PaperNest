@@ -270,13 +270,15 @@ class PaperNestSmokeTests(unittest.TestCase):
         payload = download_bytes(self.client, response.json()["download_url"])
         with fitz.open(stream=payload, filetype="pdf") as document:
             self.assertEqual(document.page_count, 2)
-            extracted = "\\n".join(page.get_text() for page in document)
+            extracted = "\n".join(page.get_text() for page in document)
             self.assertIn("Morning News Briefing", extracted)
             self.assertIn("12 November 2026", extracted)
             self.assertIn("Daily media monitoring", extracted)
             self.assertIn("politics", extracted.lower())
             self.assertIn("economy", extracted.lower())
             self.assertIn("sports", extracted.lower())
+            self.assertLess(extracted.lower().find("politics"), extracted.lower().find("economy"))
+            self.assertLess(extracted.lower().find("economy"), extracted.lower().find("sports"))
             self.assertIn("Page 1 of 2", extracted)
             self.assertIn("Page 2 of 2", extracted)
 
