@@ -19,7 +19,7 @@ from pptx import Presentation
 from pptx.util import Inches
 import fitz
 
-from app.main import app
+from app.main import app, ROOT
 
 
 def create_pdf(page_count=3, label="Test") -> bytes:
@@ -239,6 +239,68 @@ class PaperNestSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         payload = download_bytes(self.client, response.json()["download_url"])
         self.assertEqual(len(PdfReader(io.BytesIO(payload)).pages), 1)
+
+    def test_news_screenshots_compile_into_a_formatted_daily_pdf(self):
+        screenshots = []
+        for filename, color, image_format, mime in [
+            ("politics.png", (190, 70, 65), "PNG", "image/png"),
+            ("economy.jpg", (60, 130, 90), "JPEG", "image/jpeg"),
+            ("sports.png", (65, 100, 180), "PNG", "image/png"),
+        ]:
+            image_data = io.BytesIO()
+            Image.new("RGB", (180, 240), color).save(image_data, format=image_format)
+            screenshots.append(("files", (filename, image_data.getvalue(), mime)))
+
+        options = {
+            "title": "Morning News Briefing",
+            "issue_date": "12 November 2026",
+            "subtitle": "Daily media monitoring",
+            "layout": "two",
+            "page_size": "a4",
+            "orientation": "portrait",
+            "show_captions": "yes",
+            "show_page_numbers": "yes",
+        }
+        response = self.client.post(
+            "/api/process/news-screenshot-pdf",
+            files=screenshots,
+            data={"options": json.dumps(options)},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        job_dir = ROOT / response.json()["job_id"]
+        self.assertTrue(job_dir.exists())
+        payload = download_bytes(self.client, response.json()["download_url"])
+        self.assertFalse(job_dir.exists(), "News digest job files should be deleted after download.")
+        with fitz.open(stream=payload, filetype="pdf") as document:
+            self.assertEqual(document.page_count, 2)
+            extracted = "\n".join(page.get_text() for page in document)
+            self.assertIn("Morning News Briefing", extracted)
+            self.assertIn("12 November 2026", extracted)
+            self.assertIn("Daily media monitoring", extracted)
+            self.assertIn("politics", extracted.lower())
+            self.assertIn("economy", extracted.lower())
+            self.assertIn("sports", extracted.lower())
+            self.assertLess(extracted.lower().find("politics"), extracted.lower().find("economy"))
+            self.assertLess(extracted.lower().find("economy"), extracted.lower().find("sports"))
+            self.assertIn("Page 1 of 2", extracted)
+            self.assertIn("Page 2 of 2", extracted)
+
+    def test_news_screenshot_pdf_rejects_invalid_layout_and_non_images(self):
+        image_data = io.BytesIO()
+        Image.new("RGB", (80, 120), "white").save(image_data, format="PNG")
+        invalid_layout = self.client.post(
+            "/api/process/news-screenshot-pdf",
+            files=[("files", ("one.png", image_data.getvalue(), "image/png"))],
+            data={"options": '{"layout":"poster"}'},
+        )
+        self.assertEqual(invalid_layout.status_code, 400, invalid_layout.text)
+
+        non_image = self.client.post(
+            "/api/process/news-screenshot-pdf",
+            files=[("files", ("one.pdf", create_pdf(1), "application/pdf"))],
+            data={"options": "{}"},
+        )
+        self.assertEqual(non_image.status_code, 400, non_image.text)
 
     def test_editing_overlays_and_crop(self):
         cases = [
