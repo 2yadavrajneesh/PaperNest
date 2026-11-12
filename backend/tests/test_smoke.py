@@ -19,7 +19,7 @@ from pptx import Presentation
 from pptx.util import Inches
 import fitz
 
-from app.main import app
+from app.main import app, ROOT
 
 
 def create_pdf(page_count=3, label="Test") -> bytes:
@@ -267,7 +267,10 @@ class PaperNestSmokeTests(unittest.TestCase):
             data={"options": json.dumps(options)},
         )
         self.assertEqual(response.status_code, 200, response.text)
+        job_dir = ROOT / response.json()["job_id"]
+        self.assertTrue(job_dir.exists())
         payload = download_bytes(self.client, response.json()["download_url"])
+        self.assertFalse(job_dir.exists(), "News digest job files should be deleted after download.")
         with fitz.open(stream=payload, filetype="pdf") as document:
             self.assertEqual(document.page_count, 2)
             extracted = "\n".join(page.get_text() for page in document)
