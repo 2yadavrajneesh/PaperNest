@@ -640,7 +640,8 @@ def _create_news_screenshot_pdf(paths: list[Path], options: dict[str, Any], outd
                     raise HTTPException(422, f"Could not read screenshot {image_index + 1}. Re-upload it as a valid JPG or PNG image.") from exc
 
                 if show_captions:
-                    caption = image_path.stem.replace("_", " ").replace("-", " ").strip() or f"Screenshot {image_index + 1}"
+                    caption_name = re.sub(r"^\d{2}-", "", image_path.stem, count=1)
+                    caption = caption_name.replace("_", " ").replace("-", " ").strip() or f"Screenshot {image_index + 1}"
                     pdf.setFillColor(colors.HexColor("#34445D"))
                     pdf.setFont("Helvetica", 7.5)
                     pdf.drawString(x + padding, y + 6, fit_text(caption, "Helvetica", 7.5, box_width - 2 * padding))
