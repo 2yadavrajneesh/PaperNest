@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 from openpyxl import Workbook
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -57,7 +57,7 @@ PDF_TOOLS = {
     "powerpoint-to-pdf", "png-to-pdf", "edit-pdf", "page-numbers", "watermark-pdf",
     "crop-pdf", "add-text", "repair-pdf", "compare-pdf", "pdf-reader",
     "protect-pdf", "unlock-pdf", "pdf-to-png", "pdf-to-text", "pdf-metadata", "sign-pdf", "ocr-pdf",
-    "redact-pdf", "fill-pdf-form", "html-to-pdf", "sanitize-pdf-metadata", "extract-images", "pdf-to-markdown", "pdf-preflight", "remove-blank-pages",
+    "redact-pdf", "fill-pdf-form", "html-to-pdf", "sanitize-pdf-metadata", "extract-images", "pdf-to-markdown", "pdf-preflight", "remove-blank-pages", "news-screenshot-pdf",
 }
 PDF_BATCHABLE = {
     "split-pdf", "compress-pdf", "organize-pdf", "rotate-pdf", "remove-pages",
@@ -488,6 +488,183 @@ def _render_pdf_pages(source: Path, output_dir: Path, dpi: int = 144, ext: str =
         raise HTTPException(422, "The PDF could not be rendered. It may be corrupted or use unsupported features.") from exc
 
 
+def _create_news_screenshot_pdf(paths: list[Path], options: dict[str, Any], outdir: Path, base: str) -> tuple[Path, str]:
+    """Compile an ordered batch of news screenshots into a formatted daily digest PDF."""
+    if not paths:
+        raise HTTPException(400, "Upload at least one JPG or PNG news screenshot.")
+    if len(paths) > MAX_FILES:
+        raise HTTPException(413, f"Upload no more than {MAX_FILES} screenshots per digest.")
+    if any(path.suffix.lower() not in IMAGE_EXTS for path in paths):
+        raise HTTPException(400, "News Screenshot PDF accepts JPG, JPEG, and PNG images only.")
+
+    layout = str(options.get("layout", "single")).lower()
+    if layout not in {"single", "two", "four"}:
+        raise HTTPException(400, "Choose one, two, or four screenshots per page.")
+    page_size_name = str(options.get("page_size", "a4")).lower()
+    page_size = A4 if page_size_name == "a4" else (612.0, 792.0) if page_size_name == "letter" else None
+    if page_size is None:
+        raise HTTPException(400, "Choose A4 or US Letter page size.")
+    orientation = str(options.get("orientation", "portrait")).lower()
+    if orientation not in {"portrait", "landscape"}:
+        raise HTTPException(400, "Choose portrait or landscape orientation.")
+    if orientation == "landscape":
+        page_size = landscape(page_size)
+
+    per_page = {"single": 1, "two": 2, "four": 4}[layout]
+    show_captions = str(options.get("show_captions", "yes")).lower() in {"yes", "true", "1"}
+    show_page_numbers = str(options.get("show_page_numbers", "yes")).lower() in {"yes", "true", "1"}
+    title = str(options.get("title", "Daily News Update")).strip()[:140] or "Daily News Update"
+    issue_date = str(options.get("issue_date", "")).strip()[:80] or time.strftime("%d %B %Y")
+    subtitle = str(options.get("subtitle", "")).strip()[:160]
+    page_count = (len(paths) + per_page - 1) // per_page
+    page_width, page_height = page_size
+    margin = 34
+    header_height = 78
+    footer_height = 27 if show_page_numbers else 12
+    output_stem = safe_stem(title or base)
+    target = outdir / f"{output_stem}-news-digest.pdf"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    def safe_text(value: str) -> str:
+        # ReportLab's built-in Helvetica is WinAnsi encoded; replace unsupported glyphs
+        # rather than allowing a non-Latin title to fail the entire PDF job.
+        return value.encode("cp1252", errors="replace").decode("cp1252")
+
+    def fit_text(value: str, font: str, size: float, width: float) -> str:
+        text = safe_text(value.replace("\n", " ").strip())
+        if stringWidth(text, font, size) <= width:
+            return text
+        suffix = "..."
+        while text and stringWidth(text + suffix, font, size) > width:
+            text = text[:-1]
+        return text.rstrip() + suffix
+
+    try:
+        pdf = canvas.Canvas(str(target), pagesize=page_size, pageCompression=1)
+        pdf.setTitle(safe_text(title))
+        pdf.setAuthor("PaperNest")
+        pdf.setSubject("Daily news screenshot digest")
+
+        content_top = page_height - margin - header_height - 14
+        content_bottom = margin + footer_height
+        usable_height = content_top - content_bottom
+        gap = 14
+
+        for page_index in range(page_count):
+            pdf.setFillColor(colors.HexColor("#F4F6FA"))
+            pdf.rect(0, 0, page_width, page_height, stroke=0, fill=1)
+
+            header_y = page_height - margin - header_height
+            pdf.setFillColor(colors.HexColor("#17243A"))
+            pdf.roundRect(margin, header_y, page_width - 2 * margin, header_height, 10, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor("#C9D5E7"))
+            pdf.setFont("Helvetica-Bold", 7.5)
+            pdf.drawString(margin + 16, page_height - margin - 18, "PAPERNEST  /  DAILY NEWS DIGEST")
+            pdf.setFont("Helvetica", 8)
+            pdf.drawRightString(page_width - margin - 16, page_height - margin - 18, fit_text(issue_date, "Helvetica", 8, 140))
+            pdf.setFillColor(colors.white)
+            title_width = page_width - 2 * margin - 32
+            if issue_date:
+                title_width -= min(145, stringWidth(safe_text(issue_date), "Helvetica", 8) + 22)
+            title_font_size = 18 if page_width < 700 else 21
+            pdf.setFont("Helvetica-Bold", title_font_size)
+            pdf.drawString(margin + 16, page_height - margin - 43, fit_text(title, "Helvetica-Bold", title_font_size, title_width))
+            if subtitle:
+                pdf.setFillColor(colors.HexColor("#E0E7F1"))
+                pdf.setFont("Helvetica", 8.5)
+                pdf.drawString(margin + 16, page_height - margin - 62, fit_text(subtitle, "Helvetica", 8.5, page_width - 2 * margin - 32))
+
+            if per_page == 1:
+                boxes = [(margin, content_bottom, page_width - 2 * margin, usable_height)]
+            elif per_page == 2:
+                box_height = (usable_height - gap) / 2
+                boxes = [
+                    (margin, content_bottom + box_height + gap, page_width - 2 * margin, box_height),
+                    (margin, content_bottom, page_width - 2 * margin, box_height),
+                ]
+            else:
+                box_width = (page_width - 2 * margin - gap) / 2
+                box_height = (usable_height - gap) / 2
+                boxes = [
+                    (margin, content_bottom + box_height + gap, box_width, box_height),
+                    (margin + box_width + gap, content_bottom + box_height + gap, box_width, box_height),
+                    (margin, content_bottom, box_width, box_height),
+                    (margin + box_width + gap, content_bottom, box_width, box_height),
+                ]
+
+            first_item = page_index * per_page
+            for slot_index, (x, y, box_width, box_height) in enumerate(boxes):
+                image_index = first_item + slot_index
+                if image_index >= len(paths):
+                    break
+                image_path = paths[image_index]
+                padding = 9
+                caption_height = 19 if show_captions else 0
+                image_x = x + padding
+                image_y = y + padding + caption_height
+                image_width = box_width - 2 * padding
+                image_height = box_height - 2 * padding - caption_height
+
+                pdf.setFillColor(colors.white)
+                pdf.setStrokeColor(colors.HexColor("#D8DFE9"))
+                pdf.setLineWidth(0.7)
+                pdf.roundRect(x, y, box_width, box_height, 7, stroke=1, fill=1)
+
+                try:
+                    with Image.open(image_path) as opened:
+                        normalized = ImageOps.exif_transpose(opened)
+                        if "A" in normalized.getbands():
+                            rgba = normalized.convert("RGBA")
+                            screenshot = Image.new("RGB", rgba.size, "white")
+                            screenshot.paste(rgba, mask=rgba.getchannel("A"))
+                        else:
+                            screenshot = normalized.convert("RGB")
+                    try:
+                        pdf.drawImage(
+                            ImageReader(screenshot),
+                            image_x,
+                            image_y,
+                            width=image_width,
+                            height=image_height,
+                            preserveAspectRatio=True,
+                            anchor="c",
+                            mask="auto",
+                        )
+                    finally:
+                        screenshot.close()
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    raise HTTPException(422, f"Could not read screenshot {image_index + 1}. Re-upload it as a valid JPG or PNG image.") from exc
+
+                if show_captions:
+                    caption = image_path.stem.replace("_", " ").replace("-", " ").strip() or f"Screenshot {image_index + 1}"
+                    pdf.setFillColor(colors.HexColor("#34445D"))
+                    pdf.setFont("Helvetica", 7.5)
+                    pdf.drawString(x + padding, y + 6, fit_text(caption, "Helvetica", 7.5, box_width - 2 * padding))
+
+            if show_page_numbers:
+                pdf.setFillColor(colors.HexColor("#64748B"))
+                pdf.setFont("Helvetica", 7.5)
+                pdf.drawString(margin, 16, "Prepared with PaperNest")
+                pdf.drawRightString(page_width - margin, 16, f"Page {page_index + 1} of {page_count}")
+            pdf.showPage()
+
+        pdf.save()
+    except HTTPException:
+        target.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(422, "Could not compile these screenshots into a PDF. Check the image files and try again.") from exc
+
+    page_size_label = "A4" if page_size_name == "a4" else "US Letter"
+    layout_label = {"single": "one", "two": "two", "four": "four"}[layout]
+    return target, f"Compiled {len(paths)} screenshots into a {page_count}-page {page_size_label} {orientation} PDF, with {layout_label} screenshot(s) per page. The screenshot order follows your list."
+
+
 def _images_to_pdf(images: list[Path], out: Path, page_size_name: str = "a4") -> Path:
     page_sizes = {"a4": (595.28, 841.89), "letter": (612.0, 792.0), "fit": None}
     page_size = page_sizes.get(page_size_name.lower(), page_sizes["a4"])
@@ -906,6 +1083,9 @@ def _process_single(tool: str, paths: list[Path], options: dict[str, Any], outdi
             for page in reader.pages:
                 writer.add_page(page)
         return _write_pdf(writer, outdir / f"{base}-merged.pdf"), f"Merged {len(paths)} PDF files."
+
+    if tool == "news-screenshot-pdf":
+        return _create_news_screenshot_pdf(paths, options, outdir, base)
 
     if tool in {"jpg-to-pdf", "png-to-pdf"}:
         expected = {"jpg-to-pdf": {".jpg", ".jpeg"}, "png-to-pdf": {".png"}}[tool]
