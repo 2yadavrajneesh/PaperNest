@@ -70,6 +70,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
   const redactImageFrameRef = useRef<HTMLDivElement>(null);
   const redactDragStartRef = useRef<{ x: number; y: number; page: number } | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  const [screenshotPreviews, setScreenshotPreviews] = useState<{ file: File; url: string }[]>([]);
   const [settings, setSettings] = useState<Record<string, string | number>>({});
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -128,6 +129,16 @@ export function ToolWorkspace({ slug }: { slug: string }) {
     setReaderUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [firstFile]);
+
+  useEffect(() => {
+    if (tool?.slug !== "news-screenshot-pdf") {
+      setScreenshotPreviews([]);
+      return;
+    }
+    const previews = files.map((file) => ({ file, url: URL.createObjectURL(file) }));
+    setScreenshotPreviews(previews);
+    return () => previews.forEach((preview) => URL.revokeObjectURL(preview.url));
+  }, [files, tool?.slug]);
 
   useEffect(() => {
     let cancelled = false;
@@ -292,7 +303,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
   }, [tool, preview, settings.dpi]);
   const currentPageLimit = tool?.slug === "ocr-pdf" || tool?.slug === "pdf-to-powerpoint" ? 100 : tool?.slug === "html-to-pdf" ? 200 : 500;
   const activePageCount = preview?.page_count || (tool?.slug === "organize-pdf" ? organizePages.length : 0);
-  const multipleOutputNote = tool?.slug === "split-pdf" || tool?.slug === "pdf-to-jpg" || tool?.slug === "pdf-to-png" || (files.length > 1 && tool?.slug !== "sign-pdf");
+  const multipleOutputNote = tool?.slug === "split-pdf" || tool?.slug === "pdf-to-jpg" || tool?.slug === "pdf-to-png" || (files.length > 1 && !["sign-pdf", "news-screenshot-pdf"].includes(tool?.slug || ""));
 
   const addFiles = useCallback((list: FileList | File[]) => {
     if (!tool) return;
@@ -489,7 +500,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
   };
 
   const resetWorkspace = () => {
-    setFiles([]); setPreview(null); setPreviewMessage(""); setResult(null); setResultMessage(""); setError(""); setBusy(false); setStage("idle"); setUploadPercent(0); setReaderOpen(false); setSettings(makeDefaults(tool!)); setFormFields([]); setFormValues({}); setFormFieldsError(""); setOrganizePages([]); setOrganizePreviewError(""); setOrganizeDraggingPage(null); setOrganizeDropTarget(null); setRedactSession(null); setRedactPage(null); setRedactBoxes([]); setRedactPageSizes({}); setRedactError(""); setRedactDrawing(null);
+    setFiles([]); setScreenshotPreviews([]); setPreview(null); setPreviewMessage(""); setResult(null); setResultMessage(""); setError(""); setBusy(false); setStage("idle"); setUploadPercent(0); setReaderOpen(false); setSettings(makeDefaults(tool!)); setFormFields([]); setFormValues({}); setFormFieldsError(""); setOrganizePages([]); setOrganizePreviewError(""); setOrganizeDraggingPage(null); setOrganizeDropTarget(null); setRedactSession(null); setRedactPage(null); setRedactBoxes([]); setRedactPageSizes({}); setRedactError(""); setRedactDrawing(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -497,7 +508,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
     return <main className="tool-page"><div className="mx-auto max-w-3xl px-5 py-24 text-center"><h1 className="text-3xl font-bold">Tool not found</h1><p className="mt-3 text-sm text-slate-500">This PaperNest tool does not exist.</p><Link href="/" className="primary-cta mt-6">Back to all tools <ArrowRight size={16} /></Link></div></main>;
   }
   const ToolIcon = tool.icon;
-  const canReorder = files.length > 1 && ["merge-pdf", "jpg-to-pdf", "png-to-pdf"].includes(tool.slug);
+  const canReorder = files.length > 1 && ["merge-pdf", "jpg-to-pdf", "png-to-pdf", "news-screenshot-pdf"].includes(tool.slug);
   const onlyTwo = tool.slug === "compare-pdf";
 
   return (
@@ -530,7 +541,7 @@ export function ToolWorkspace({ slug }: { slug: string }) {
                 </div>
               ) : !files.length ? (
                 <div className={`dropzone ${dragging ? "dragging" : ""}`} role="button" tabIndex={0} onClick={() => fileInputRef.current?.click()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInputRef.current?.click(); }}>
-                  <div className="dropzone-icon"><UploadCloud size={25} /></div><h3>Drop your {tool.formats} here</h3><p>{tool.slug === "sign-pdf" ? "Add the PDF first, then the signature image." : tool.slug === "redact-pdf" ? "Choose a PDF, then drag your mouse over anything you want permanently removed." : tool.slug === "fill-pdf-form" ? "Upload a fillable PDF; the form fields will be detected automatically." : "or select files from your device"}</p><span className="dropzone-button">Choose files</span><span className="dropzone-footnote">Up to 50 MB per file · 100 MB per job</span>
+                  <div className="dropzone-icon"><UploadCloud size={25} /></div><h3>{tool.slug === "news-screenshot-pdf" ? "Drop all your news screenshots here" : `Drop your ${tool.formats} here`}</h3><p>{tool.slug === "sign-pdf" ? "Add the PDF first, then the signature image." : tool.slug === "redact-pdf" ? "Choose a PDF, then drag your mouse over anything you want permanently removed." : tool.slug === "fill-pdf-form" ? "Upload a fillable PDF; the form fields will be detected automatically." : tool.slug === "news-screenshot-pdf" ? "Select multiple JPG, JPEG, or PNG screenshots. You can change their order before creating the digest." : "or select files from your device"}</p><span className="dropzone-button">Choose files</span><span className="dropzone-footnote">Up to 50 MB per file · 100 MB per job</span>
                 </div>
               ) : (
                 <div className="file-list">
@@ -545,10 +556,11 @@ export function ToolWorkspace({ slug }: { slug: string }) {
                       </div>
                     </div>;
                   })}
+                  {tool.slug === "news-screenshot-pdf" && <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/40"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Screenshot sequence</h3><p className="text-xs text-slate-500 dark:text-slate-400">Use the arrows beside each file to change the PDF order.</p></div><span className="page-count-pill">{files.length} / {MAX_FILES}</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-3">{screenshotPreviews.map((item, index) => <figure key={`${item.file.name}-${item.file.lastModified}-${index}`} className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-950"><div className="flex h-36 items-center justify-center bg-slate-100 p-2 dark:bg-slate-900"><img src={item.url} alt={`Screenshot ${index + 1}: ${item.file.name}`} className="max-h-full max-w-full object-contain" /></div><figcaption className="flex items-center gap-2 px-2 py-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-800 text-[10px] font-semibold text-white">{index + 1}</span><span className="min-w-0 truncate text-[11px] text-slate-600 dark:text-slate-300" title={item.file.name}>{item.file.name}</span></figcaption></figure>)}</div></section>}
                   <button className="inline-add" type="button" onClick={() => fileInputRef.current?.click()}><Plus size={15} /> Add more files</button>
                   {totalBytes > MAX_TOTAL && <div className="processing-state error"><AlertCircle size={16} /> Total upload exceeds 100 MB. Remove a file before continuing.</div>}
                   {onlyTwo && <p className="setting-help">Comparison requires exactly two PDFs. Upload two versions of the document.</p>}
-                  {tool.slug === "merge-pdf" && <p className="setting-help">Files are merged in the order shown above. Use the arrows to reorder them.</p>}
+                  {tool.slug === "merge-pdf" && <p className="setting-help">Files are merged in the order shown above. Use the arrows to reorder them.</p>}{tool.slug === "news-screenshot-pdf" && <p className="setting-help">The PDF follows this screenshot order. Each filename is used as its caption when captions are enabled. Change a filename before upload to customize its caption.</p>}
                 </div>
               )}
               {error && <div className="processing-state error"><AlertCircle size={16} /><span>{error}</span></div>}
