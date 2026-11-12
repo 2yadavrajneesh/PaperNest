@@ -446,6 +446,9 @@ export function ToolWorkspace({ slug }: { slug: string }) {
     const body = new FormData();
     files.forEach((file) => body.append("files", file, file.name));
     const requestOptions: Record<string, unknown> = { ...settings };
+    if (tool.slug === "news-screenshot-pdf" && !String(requestOptions.issue_date || "").trim()) {
+      requestOptions.issue_date = new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "long", year: "numeric" }).format(new Date());
+    }
     if (tool.slug === "fill-pdf-form") requestOptions.form_values = formValues;
     if (tool.slug === "redact-pdf") {
       requestOptions.boxes_json = JSON.stringify(redactBoxes.map((box) => {
